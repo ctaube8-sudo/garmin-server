@@ -5,7 +5,6 @@ Deployed on Render — reads session tokens from GARMIN_TOKENS env var.
 Setup: run get_tokens.py locally once, paste output into Render as GARMIN_TOKENS.
 """
 
-import base64
 import json
 import os
 import threading
@@ -41,7 +40,7 @@ _cache = {
 def init_garth():
     """Load tokens from env var (preferred) or fall back to password auth."""
     if GARMIN_TOKENS:
-        garth.client.loads(base64.b64decode(GARMIN_TOKENS).decode())
+        garth.client.loads(GARMIN_TOKENS)
         print('[garmin] Loaded session from GARMIN_TOKENS.')
     elif GARMIN_EMAIL and GARMIN_PASSWORD:
         print(f'[garmin] Logging in as {GARMIN_EMAIL}...')
