@@ -29,14 +29,22 @@ DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 REFRESH_INTERVAL = 30 * 60  # 30 minutes
 CACHE_FILE       = '/tmp/garmin_cache.json'
 
-# ── In-memory cache ────────────────────────────────────────────────────────────
-_cache = {
-    'data':         None,
-    'synced_at':    None,
-    'display_name': None,
-    'last_error':   None,
-    'lock':         threading.Lock(),
-}
+# ── In-memory cache (pre-populated from disk at startup) ──────────────────────
+def _init_cache():
+    c = {'data': None, 'synced_at': None, 'display_name': None,
+         'last_error': None, 'lock': threading.Lock()}
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE) as f:
+                d = json.load(f)
+            c['data']      = d
+            c['synced_at'] = d.get('synced_at')
+            print(f'[garmin] Pre-loaded disk cache (synced_at: {c["synced_at"]}).')
+    except Exception as e:
+        print(f'[garmin] Pre-load failed: {e}')
+    return c
+
+_cache = _init_cache()
 
 
 # ── Disk persistence ───────────────────────────────────────────────────────────
