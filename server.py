@@ -7,6 +7,7 @@ Setup: run get_tokens.py locally once, paste output into Render as GARMIN_TOKENS
 
 import json
 import os
+import traceback
 import threading
 import time
 from datetime import date, timedelta, datetime
@@ -19,19 +20,21 @@ app = Flask(__name__)
 CORS(app)
 
 # ── Credentials from env vars ──────────────────────────────────────────────────
-GARMIN_TOKENS   = os.environ.get('GARMIN_TOKENS', '')
-GARMIN_EMAIL    = os.environ.get('GARMIN_EMAIL', '')
-GARMIN_PASSWORD = os.environ.get('GARMIN_PASSWORD', '')
-DAYS            = int(os.environ.get('GARMIN_DAYS', '14'))
+GARMIN_TOKENS       = os.environ.get('GARMIN_TOKENS', '')
+GARMIN_EMAIL        = os.environ.get('GARMIN_EMAIL', '')
+GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
+GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
+DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 
 REFRESH_INTERVAL = 30 * 60  # 30 minutes
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
 _cache = {
-    'data':      None,
-    'synced_at': None,
+    'data':         None,
+    'synced_at':    None,
     'display_name': None,
-    'lock':      threading.Lock(),
+    'last_error':   None,
+    'lock':         threading.Lock(),
 }
 
 
@@ -48,6 +51,10 @@ def init_garth():
         print('[garmin] Logged in.')
     else:
         raise RuntimeError('Set GARMIN_TOKENS (or GARMIN_EMAIL + GARMIN_PASSWORD) env vars.')
+
+    if GARMIN_DISPLAY_NAME:
+        print(f'[garmin] Using display name from env: {GARMIN_DISPLAY_NAME}')
+        return GARMIN_DISPLAY_NAME
 
     profile = garth.connectapi('/userprofile-service/socialProfile')
     display_name = profile.get('displayName') or profile.get('userName')
@@ -161,10 +168,27 @@ def run_sync():
 def status():
     with _cache['lock']:
         return jsonify({
-            'status':    'ok',
-            'synced_at': _cache['synced_at'],
-            'has_data':  _cache['data'] is not None,
+            'status':       'ok',
+            'synced_at':    _cache['synced_at'],
+            'has_data':     _cache['data'] is not None,
+            'display_name': _cache['display_name'],
+            'last_error':   _cache.get('last_error'),
         })
+
+
+@app.route('/debug')
+def debug():
+    error = None
+    display_name = None
+    try:
+        garth.client.loads(GARMIN_TOKENS)
+        display_name = GARMIN_DISPLAY_NAME or 'not set'
+        if not GARMIN_DISPLAY_NAME:
+            profile = garth.connectapi('/userprofile-service/socialProfile')
+            display_name = profile.get('displayName') or profile.get('userName')
+    except Exception as e:
+        error = traceback.format_exc()
+    return jsonify({'display_name': display_name, 'error': error})
 
 
 @app.route('/data')
@@ -230,6 +254,7 @@ def startup_sync():
             print('[garmin] Initial sync done.')
         except Exception as e:
             print(f'[garmin] Startup failed: {e}')
+            traceback.print_exc()
     threading.Thread(target=_go, daemon=True).start()
 
 
