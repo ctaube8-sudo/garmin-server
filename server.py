@@ -1,37 +1,62 @@
 """
 Garmin Connect proxy server for life-maxxing PWA.
-Deployed on Railway — reads credentials from environment variables.
+Deployed on Render — reads session tokens from GARMIN_TOKENS env var.
+
+Setup: run get_tokens.py locally once, paste output into Render as GARMIN_TOKENS.
 """
 
+import base64
 import json
 import os
 import threading
 import time
 from datetime import date, timedelta, datetime
 
+import garth
 from flask import Flask, jsonify
 from flask_cors import CORS
-from garminconnect import Garmin
 
 app = Flask(__name__)
 CORS(app)
 
-# ── Credentials from env vars (set in Railway dashboard) ──────────────────────
+# ── Credentials from env vars ──────────────────────────────────────────────────
+GARMIN_TOKENS   = os.environ.get('GARMIN_TOKENS', '')
 GARMIN_EMAIL    = os.environ.get('GARMIN_EMAIL', '')
 GARMIN_PASSWORD = os.environ.get('GARMIN_PASSWORD', '')
 DAYS            = int(os.environ.get('GARMIN_DAYS', '14'))
+
+REFRESH_INTERVAL = 30 * 60  # 30 minutes
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
 _cache = {
     'data':      None,
     'synced_at': None,
+    'display_name': None,
     'lock':      threading.Lock(),
 }
 
-REFRESH_INTERVAL = 30 * 60  # 30 minutes
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+def init_garth():
+    """Load tokens from env var (preferred) or fall back to password auth."""
+    if GARMIN_TOKENS:
+        garth.client.loads(base64.b64decode(GARMIN_TOKENS).decode())
+        print('[garmin] Loaded session from GARMIN_TOKENS.')
+    elif GARMIN_EMAIL and GARMIN_PASSWORD:
+        print(f'[garmin] Logging in as {GARMIN_EMAIL}...')
+        garth.login(GARMIN_EMAIL, GARMIN_PASSWORD)
+        print('[garmin] Logged in.')
+    else:
+        raise RuntimeError('Set GARMIN_TOKENS (or GARMIN_EMAIL + GARMIN_PASSWORD) env vars.')
+
+    profile = garth.connectapi('/userprofile-service/socialProfile')
+    display_name = profile.get('displayName') or profile.get('userName')
+    print(f'[garmin] Display name: {display_name}')
+    return display_name
 
 
-# ── Garmin helpers ─────────────────────────────────────────────────────────────
+# ── Garmin API helpers ─────────────────────────────────────────────────────────
 
 def safe_get(d, *keys, default=None):
     cur = d
@@ -44,11 +69,14 @@ def safe_get(d, *keys, default=None):
     return cur
 
 
-def pull_day(api, date_str):
+def pull_day(display_name, date_str):
     day = {'date': date_str}
 
     try:
-        sleep = api.get_sleep_data(date_str)
+        sleep = garth.connectapi(
+            f'/wellness-service/wellness/dailySleepData/{display_name}',
+            params={'date': date_str}
+        )
         summary = safe_get(sleep, 'dailySleepDTO') or {}
         day['sleep_hours']     = round((summary.get('sleepTimeSeconds') or 0) / 3600, 2)
         day['sleep_score']     = (summary.get('sleepScores', {}).get('overall', {}).get('value')
@@ -63,14 +91,17 @@ def pull_day(api, date_str):
                     'rem_sleep_min': None, 'light_sleep_min': None, 'awake_min': None})
 
     try:
-        hrv_data = api.get_hrv_data(date_str)
+        hrv_data = garth.connectapi(f'/hrv-service/hrv/{date_str}')
         day['hrv'] = safe_get(hrv_data, 'hrvSummary', 'lastNight')
     except Exception as e:
         print(f'  [hrv] {date_str}: {e}')
         day['hrv'] = None
 
     try:
-        stats = api.get_stats(date_str)
+        stats = garth.connectapi(
+            f'/usersummary-service/usersummary/daily/{display_name}',
+            params={'calendarDate': date_str}
+        )
         day['steps']           = stats.get('totalSteps')
         day['resting_hr']      = stats.get('restingHeartRate')
         day['avg_stress']      = stats.get('averageStressLevel')
@@ -82,10 +113,14 @@ def pull_day(api, date_str):
                     'active_calories': None, 'total_calories': None})
 
     try:
-        bb = api.get_body_battery(date_str)
-        if bb and isinstance(bb, list):
-            day['body_battery_start'] = bb[0].get('bodyBatteryLevel') if bb else None
-            day['body_battery_end']   = bb[-1].get('bodyBatteryLevel') if bb else None
+        bb = garth.connectapi(
+            '/wellness-service/wellness/bodyBattery/graphs',
+            params={'startDate': date_str, 'endDate': date_str}
+        )
+        if bb and isinstance(bb, list) and bb[0].get('bodyBatteryValuesArray'):
+            vals = bb[0]['bodyBatteryValuesArray']
+            day['body_battery_start'] = vals[0][1]  if vals else None
+            day['body_battery_end']   = vals[-1][1] if vals else None
         else:
             day['body_battery_start'] = None
             day['body_battery_end']   = None
@@ -98,18 +133,20 @@ def pull_day(api, date_str):
 
 
 def run_sync():
-    print(f'[garmin] Syncing {DAYS} days as {GARMIN_EMAIL}...')
-    api = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
-    api.login()
-    print('[garmin] Logged in.')
+    with _cache['lock']:
+        display_name = _cache['display_name']
 
+    if not display_name:
+        raise RuntimeError('Not authenticated yet.')
+
+    print(f'[garmin] Syncing {DAYS} days for {display_name}...')
     today_date = date.today()
     days_data = []
     for i in range(DAYS - 1, -1, -1):
         d = today_date - timedelta(days=i)
         date_str = d.isoformat()
         print(f'  Pulling {date_str}...')
-        days_data.append(pull_day(api, date_str))
+        days_data.append(pull_day(display_name, date_str))
 
     payload = {
         'synced_at': datetime.now().isoformat(timespec='seconds'),
@@ -184,20 +221,20 @@ def background_loop():
 def startup_sync():
     def _go():
         try:
+            display_name = init_garth()
+            with _cache['lock']:
+                _cache['display_name'] = display_name
             payload = run_sync()
             with _cache['lock']:
                 _cache['data']      = payload
                 _cache['synced_at'] = payload['synced_at']
             print('[garmin] Initial sync done.')
         except Exception as e:
-            print(f'[garmin] Initial sync failed: {e}')
+            print(f'[garmin] Startup failed: {e}')
     threading.Thread(target=_go, daemon=True).start()
 
 
-# ── Start background threads on import (gunicorn-safe) ────────────────────────
+# ── Start on import (gunicorn-safe) ───────────────────────────────────────────
 
-if GARMIN_EMAIL and GARMIN_PASSWORD:
-    startup_sync()
-    threading.Thread(target=background_loop, daemon=True).start()
-else:
-    print('[garmin] WARNING: GARMIN_EMAIL / GARMIN_PASSWORD env vars not set.')
+startup_sync()
+threading.Thread(target=background_loop, daemon=True).start()
