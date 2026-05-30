@@ -1,6 +1,6 @@
 flask
 flask-cors
-garminconnect==0.1.22
+garminconnect==0.1.55
 python-dotenv
 gunicorn
 requests
