@@ -27,6 +27,7 @@ GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
 DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 
 REFRESH_INTERVAL = 30 * 60  # 30 minutes
+CACHE_FILE       = '/tmp/garmin_cache.json'
 
 # ── In-memory cache ────────────────────────────────────────────────────────────
 _cache = {
@@ -36,6 +37,29 @@ _cache = {
     'last_error':   None,
     'lock':         threading.Lock(),
 }
+
+
+# ── Disk persistence ───────────────────────────────────────────────────────────
+
+def save_to_disk(payload):
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(payload, f)
+        print('[garmin] Saved data to disk.')
+    except Exception as e:
+        print(f'[garmin] Disk save failed: {e}')
+
+
+def load_from_disk():
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE) as f:
+                payload = json.load(f)
+            print(f'[garmin] Loaded cached data from disk (synced_at: {payload.get("synced_at")}).')
+            return payload
+    except Exception as e:
+        print(f'[garmin] Disk load failed: {e}')
+    return None
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -172,7 +196,7 @@ def status():
             'synced_at':    _cache['synced_at'],
             'has_data':     _cache['data'] is not None,
             'display_name': _cache['display_name'],
-            'last_error':   _cache.get('last_error'),
+            'last_error':   _cache['last_error'],
         })
 
 
@@ -207,6 +231,7 @@ def sync():
         with _cache['lock']:
             _cache['data']      = payload
             _cache['synced_at'] = payload['synced_at']
+        save_to_disk(payload)
         return jsonify(payload)
     except Exception as e:
         print(f'[garmin] Sync error: {e}')
@@ -237,6 +262,7 @@ def background_loop():
             with _cache['lock']:
                 _cache['data']      = payload
                 _cache['synced_at'] = payload['synced_at']
+            save_to_disk(payload)
         except Exception as e:
             print(f'[garmin] Auto-refresh failed: {e}')
 
@@ -244,17 +270,31 @@ def background_loop():
 def startup_sync():
     def _go():
         try:
+            # Load stale data from disk immediately so has_data is true right away
+            cached = load_from_disk()
+            if cached:
+                with _cache['lock']:
+                    _cache['data']      = cached
+                    _cache['synced_at'] = cached.get('synced_at')
+
+            # Auth
             display_name = init_garth()
             with _cache['lock']:
                 _cache['display_name'] = display_name
+
+            # Fresh sync
             payload = run_sync()
             with _cache['lock']:
                 _cache['data']      = payload
                 _cache['synced_at'] = payload['synced_at']
+                _cache['last_error'] = None
+            save_to_disk(payload)
             print('[garmin] Initial sync done.')
         except Exception as e:
             print(f'[garmin] Startup failed: {e}')
             traceback.print_exc()
+            with _cache['lock']:
+                _cache['last_error'] = str(e)
     threading.Thread(target=_go, daemon=True).start()
 
 
