@@ -21,7 +21,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ── Credentials from env vars ──────────────────────────────────────────────────
-GARMIN_TOKENS       = os.environ.get('GARMIN_TOKENS', '').strip()
+GARMIN_TOKENS       = ''.join(os.environ.get('GARMIN_TOKENS', '').split())  # strip ALL whitespace incl. embedded newlines
 GARMIN_EMAIL        = os.environ.get('GARMIN_EMAIL', '')
 GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
 GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
@@ -76,7 +76,10 @@ def load_from_disk():
 def init_garth():
     """Load tokens from env var (preferred) or fall back to password auth."""
     if GARMIN_TOKENS:
-        garth.client.loads(GARMIN_TOKENS)
+        # Fix base64 padding — Render may strip trailing '=' characters
+        token = GARMIN_TOKENS
+        token += '=' * (-len(token) % 4)
+        garth.client.loads(token)
         print('[garmin] Loaded session from GARMIN_TOKENS.')
     elif GARMIN_EMAIL and GARMIN_PASSWORD:
         print(f'[garmin] Logging in as {GARMIN_EMAIL}...')
