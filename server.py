@@ -10,6 +10,7 @@ import os
 import traceback
 import threading
 import time
+import urllib.request
 from datetime import date, timedelta, datetime
 
 import garth
@@ -26,7 +27,7 @@ GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
 GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
 DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 
-REFRESH_INTERVAL = 30 * 60  # 30 minutes
+REFRESH_INTERVAL = 15 * 60  # 15 minutes
 CACHE_FILE       = '/tmp/garmin_cache.json'
 
 # ── In-memory cache (pre-populated from disk at startup) ──────────────────────
@@ -257,6 +258,20 @@ def today_endpoint():
     if day is None and payload['days']:
         day = payload['days'][-1]
     return jsonify({**day, 'synced_at': payload['synced_at']})
+
+
+@app.route('/stock/<ticker>')
+def stock_price(ticker):
+    ticker = ticker.upper().strip()
+    url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        price = data['chart']['result'][0]['meta']['regularMarketPrice']
+        return jsonify({'ticker': ticker, 'price': float(price)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ── Background refresh ─────────────────────────────────────────────────────────
