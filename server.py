@@ -275,38 +275,33 @@ def background_loop():
             print(f'[garmin] Auto-refresh failed: {e}')
 
 
-def startup_sync():
-    def _go():
-        try:
-            # Load stale data from disk immediately so has_data is true right away
-            cached = load_from_disk()
-            if cached:
-                with _cache['lock']:
-                    _cache['data']      = cached
-                    _cache['synced_at'] = cached.get('synced_at')
-
-            # Auth
-            display_name = init_garth()
-            with _cache['lock']:
-                _cache['display_name'] = display_name
-
-            # Fresh sync
-            payload = run_sync()
-            with _cache['lock']:
-                _cache['data']      = payload
-                _cache['synced_at'] = payload['synced_at']
-                _cache['last_error'] = None
-            save_to_disk(payload)
-            print('[garmin] Initial sync done.')
-        except Exception as e:
-            print(f'[garmin] Startup failed: {e}')
-            traceback.print_exc()
-            with _cache['lock']:
-                _cache['last_error'] = str(e)
-    threading.Thread(target=_go, daemon=True).start()
+def do_startup():
+    """Runs synchronously — blocks until first sync completes."""
+    try:
+        display_name = init_garth()
+        with _cache['lock']:
+            _cache['display_name'] = display_name
+        payload = run_sync()
+        with _cache['lock']:
+            _cache['data']      = payload
+            _cache['synced_at'] = payload['synced_at']
+            _cache['last_error'] = None
+        save_to_disk(payload)
+        print('[garmin] Initial sync done.')
+    except Exception as e:
+        print(f'[garmin] Startup failed: {e}')
+        traceback.print_exc()
+        with _cache['lock']:
+            _cache['last_error'] = str(e)
 
 
-# ── Start on import (gunicorn-safe) ───────────────────────────────────────────
+# ── Start ─────────────────────────────────────────────────────────────────────
 
-startup_sync()
+# Run startup sync in background so Flask binds to PORT immediately.
+# /status returns has_data: false while sync is in progress (expected).
+threading.Thread(target=do_startup, daemon=True).start()
 threading.Thread(target=background_loop, daemon=True).start()
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, threaded=True)
