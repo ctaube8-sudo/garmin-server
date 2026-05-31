@@ -27,7 +27,7 @@ GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
 GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
 DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 
-REFRESH_INTERVAL = 15 * 60  # 15 minutes
+REFRESH_INTERVAL = 60 * 60  # 1 hour — Garmin API rate limits on frequent calls
 CACHE_FILE       = '/tmp/garmin_cache.json'
 
 # ── In-memory cache (pre-populated from disk at startup) ──────────────────────
@@ -258,6 +258,47 @@ def today_endpoint():
     if day is None and payload['days']:
         day = payload['days'][-1]
     return jsonify({**day, 'synced_at': payload['synced_at']})
+
+
+@app.route('/today-sync', methods=['POST'])
+def today_sync():
+    """Light sync — only pulls today + yesterday (~10 API calls vs 60 for full sync)."""
+    with _cache['lock']:
+        display_name = _cache['display_name']
+        payload = _cache['data']
+
+    if not display_name:
+        return jsonify({'error': 'Not authenticated yet'}), 503
+
+    try:
+        today_str     = date.today().isoformat()
+        yesterday_str = (date.today() - timedelta(days=1)).isoformat()
+
+        today_day     = pull_day(display_name, today_str)
+        yesterday_day = pull_day(display_name, yesterday_str)
+
+        with _cache['lock']:
+            if _cache['data'] and _cache['data'].get('days'):
+                days = _cache['data']['days']
+                # Replace or append today + yesterday
+                for new_day in [yesterday_day, today_day]:
+                    idx = next((i for i, d in enumerate(days) if d['date'] == new_day['date']), None)
+                    if idx is not None:
+                        days[idx] = new_day
+                    else:
+                        days.append(new_day)
+                days.sort(key=lambda d: d['date'])
+                _cache['data']['synced_at'] = datetime.now().isoformat(timespec='seconds')
+                payload = _cache['data']
+            else:
+                return jsonify({'error': 'No base data yet — run full sync first'}), 503
+
+        save_to_disk(payload)
+        print(f'[garmin] Today-sync complete.')
+        return jsonify(payload)
+    except Exception as e:
+        print(f'[garmin] Today-sync error: {e}')
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/stock/<ticker>')
