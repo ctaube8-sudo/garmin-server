@@ -21,7 +21,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ── Credentials from env vars ──────────────────────────────────────────────────
-GARMIN_TOKENS       = os.environ.get('GARMIN_TOKENS', '')
+GARMIN_TOKENS       = os.environ.get('GARMIN_TOKENS', '').strip()
 GARMIN_EMAIL        = os.environ.get('GARMIN_EMAIL', '')
 GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
 GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
