@@ -263,15 +263,35 @@ def today_endpoint():
 @app.route('/stock/<ticker>')
 def stock_price(ticker):
     ticker = ticker.upper().strip()
-    url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d'
+
+    # Try Yahoo Finance (query1 then query2)
+    for host in ['query1', 'query2']:
+        url = f'https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d'
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json',
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read())
+            price = data['chart']['result'][0]['meta']['regularMarketPrice']
+            return jsonify({'ticker': ticker, 'price': float(price), 'source': host})
+        except Exception as e:
+            print(f'[stock] {host} failed for {ticker}: {e}')
+
+    # Fallback: Stooq (no API key needed)
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        stooq_url = f'https://stooq.com/q/l/?s={ticker}.us&f=sd2t2ohlcv&h&e=json'
+        req = urllib.request.Request(stooq_url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
-        price = data['chart']['result'][0]['meta']['regularMarketPrice']
-        return jsonify({'ticker': ticker, 'price': float(price)})
+        symbols = data.get('symbols', [])
+        if symbols and symbols[0].get('Close') not in (None, 'N/D'):
+            return jsonify({'ticker': ticker, 'price': float(symbols[0]['Close']), 'source': 'stooq'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f'[stock] stooq failed for {ticker}: {e}')
+
+    return jsonify({'error': f'Could not fetch price for {ticker}'}), 500
 
 
 # ── Background refresh ─────────────────────────────────────────────────────────
