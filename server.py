@@ -5,16 +5,19 @@ Deployed on Render — reads session tokens from GARMIN_TOKENS env var.
 Setup: run get_tokens.py locally once, paste output into Render as GARMIN_TOKENS.
 """
 
+import base64
 import json
 import os
+import re
 import traceback
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import date, timedelta, datetime
 
 import garth
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -26,6 +29,9 @@ GARMIN_EMAIL        = os.environ.get('GARMIN_EMAIL', '')
 GARMIN_PASSWORD     = os.environ.get('GARMIN_PASSWORD', '')
 GARMIN_DISPLAY_NAME = os.environ.get('GARMIN_DISPLAY_NAME', '')
 DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
+
+FATSECRET_CLIENT_ID     = os.environ.get('FATSECRET_CLIENT_ID', '')
+FATSECRET_CLIENT_SECRET = os.environ.get('FATSECRET_CLIENT_SECRET', '')
 
 REFRESH_INTERVAL = 60 * 60  # 1 hour — Garmin API rate limits on frequent calls
 CACHE_FILE       = '/tmp/garmin_cache.json'
@@ -198,6 +204,48 @@ def run_sync():
     return payload
 
 
+# ── FatSecret food search ──────────────────────────────────────────────────────
+
+_fs_token = {'access_token': None, 'expires_at': 0, 'lock': threading.Lock()}
+
+
+def get_fatsecret_token():
+    with _fs_token['lock']:
+        if _fs_token['access_token'] and time.time() < _fs_token['expires_at'] - 60:
+            return _fs_token['access_token']
+
+    creds = base64.b64encode(f"{FATSECRET_CLIENT_ID}:{FATSECRET_CLIENT_SECRET}".encode()).decode()
+    req = urllib.request.Request(
+        'https://oauth.fatsecret.com/connect/token',
+        data=b'grant_type=client_credentials&scope=basic',
+        headers={
+            'Authorization': f'Basic {creds}',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        }
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        tok = json.loads(r.read())
+
+    with _fs_token['lock']:
+        _fs_token['access_token'] = tok['access_token']
+        _fs_token['expires_at'] = time.time() + tok.get('expires_in', 86400)
+
+    return tok['access_token']
+
+
+def parse_fs_desc(desc):
+    """Parse FatSecret description: 'Per 100g - Calories: 165kcal | Fat: 3.57g | Carbs: 0g | Protein: 31g'"""
+    per_m = re.match(r'^Per\s+(.+?)\s*-', desc)
+    per = per_m.group(1).strip() if per_m else ''
+
+    def ex(label):
+        m = re.search(rf'{label}:\s*([\d.]+)', desc, re.IGNORECASE)
+        return round(float(m.group(1))) if m else 0
+
+    return {'per': per, 'cal': ex('Calories'), 'protein': ex('Protein'),
+            'carbs': ex('Carbs'), 'fat': ex('Fat')}
+
+
 # ── Flask routes ───────────────────────────────────────────────────────────────
 
 @app.route('/status')
@@ -301,6 +349,47 @@ def today_sync():
         return jsonify(payload)
     except Exception as e:
         print(f'[garmin] Today-sync error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/food/search')
+def food_search():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'error': 'Missing q parameter'}), 400
+    if not FATSECRET_CLIENT_ID or not FATSECRET_CLIENT_SECRET:
+        return jsonify({'error': 'FatSecret credentials not configured'}), 500
+    try:
+        token = get_fatsecret_token()
+        url = (
+            'https://platform.fatsecret.com/rest/server.api'
+            f'?method=foods.search'
+            f'&search_expression={urllib.parse.quote(query, safe="")}'
+            f'&format=json&max_results=8'
+        )
+        req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+
+        raw = data.get('foods', {}).get('food', [])
+        if isinstance(raw, dict):
+            raw = [raw]  # single result comes back as dict, not list
+
+        results = []
+        for f in raw:
+            macros = parse_fs_desc(f.get('food_description', ''))
+            results.append({
+                'id':    f.get('food_id'),
+                'name':  f.get('food_name', ''),
+                'brand': f.get('brand_name', ''),
+                'type':  f.get('food_type', ''),
+                **macros,
+            })
+
+        return jsonify({'results': results})
+    except Exception as e:
+        print(f'[fatsecret] Search error: {e}')
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
