@@ -32,6 +32,7 @@ DAYS                = int(os.environ.get('GARMIN_DAYS', '14'))
 
 FATSECRET_CLIENT_ID     = os.environ.get('FATSECRET_CLIENT_ID', '')
 FATSECRET_CLIENT_SECRET = os.environ.get('FATSECRET_CLIENT_SECRET', '')
+GROQ_API_KEY            = os.environ.get('GROQ_API_KEY', '')
 
 REFRESH_INTERVAL = 60 * 60  # 1 hour — Garmin API rate limits on frequent calls
 CACHE_FILE       = '/tmp/garmin_cache.json'
@@ -349,6 +350,55 @@ def today_sync():
         return jsonify(payload)
     except Exception as e:
         print(f'[garmin] Today-sync error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/food/ai-search')
+def food_ai_search():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'error': 'Missing q parameter'}), 400
+    if not GROQ_API_KEY:
+        return jsonify({'error': 'Groq API key not configured'}), 500
+    try:
+        prompt = (
+            f'Return nutrition info for: "{query}"\n\n'
+            'Respond with ONLY a JSON array (no explanation, no markdown) of 1-3 most relevant options:\n'
+            '[{"name": "...", "per": "...", "cal": N, "protein": N, "carbs": N, "fat": N}]\n\n'
+            'Rules:\n'
+            '- "per" = serving size (e.g. "1 sandwich", "100g", "12 oz")\n'
+            '- All macro values are integers\n'
+            '- If a weight is in the query (e.g. "12oz spaghetti"), scale macros to that weight\n'
+            '- For restaurant items, use actual menu nutrition if known\n'
+            '- Return realistic, accurate values'
+        )
+        body = json.dumps({
+            'model': 'llama-3.3-70b-versatile',
+            'messages': [{'role': 'user', 'content': prompt}],
+            'temperature': 0.1,
+            'max_tokens': 500,
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.groq.com/openai/v1/chat/completions',
+            data=body,
+            headers={
+                'Authorization': f'Bearer {GROQ_API_KEY}',
+                'Content-Type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read())
+        content = resp['choices'][0]['message']['content'].strip()
+        # Strip markdown code fences if model adds them
+        content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.MULTILINE)
+        content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
+        results = json.loads(content)
+        if not isinstance(results, list):
+            results = [results]
+        return jsonify({'results': results})
+    except Exception as e:
+        print(f'[groq] Food search error: {e}')
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
