@@ -9,11 +9,14 @@ import base64
 import json
 import os
 import re
+import ssl
 import traceback
 import threading
 import time
 import urllib.parse
 import urllib.request
+
+_ssl_ctx = ssl._create_unverified_context()
 from datetime import date, timedelta, datetime
 
 import garth
@@ -386,7 +389,7 @@ def food_ai_search():
                 'Content-Type': 'application/json',
             }
         )
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as r:
             resp = json.loads(r.read())
         content = resp['choices'][0]['message']['content'].strip()
         # Strip markdown code fences if model adds them
