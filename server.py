@@ -84,13 +84,20 @@ def load_from_disk():
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
 def init_garth():
-    """Load tokens from env var (preferred) or fall back to password auth."""
+    """Load tokens from env var, falling back to password auth if tokens are expired/invalid."""
     if GARMIN_TOKENS:
-        # Fix base64 padding — Render may strip trailing '=' characters
-        token = GARMIN_TOKENS
-        token += '=' * (-len(token) % 4)
-        garth.client.loads(token)
-        print('[garmin] Loaded session from GARMIN_TOKENS.')
+        try:
+            token = GARMIN_TOKENS + '=' * (-len(GARMIN_TOKENS) % 4)
+            garth.client.loads(token)
+            # Verify the session is still valid with a lightweight API call
+            garth.connectapi('/userprofile-service/socialProfile')
+            print('[garmin] Loaded session from GARMIN_TOKENS — still valid.')
+        except Exception as e:
+            print(f'[garmin] GARMIN_TOKENS expired or invalid ({e}) — falling back to password auth.')
+            if not GARMIN_EMAIL or not GARMIN_PASSWORD:
+                raise RuntimeError('GARMIN_TOKENS invalid and no GARMIN_EMAIL/GARMIN_PASSWORD set.')
+            garth.login(GARMIN_EMAIL, GARMIN_PASSWORD)
+            print('[garmin] Logged in with email/password.')
     elif GARMIN_EMAIL and GARMIN_PASSWORD:
         print(f'[garmin] Logging in as {GARMIN_EMAIL}...')
         garth.login(GARMIN_EMAIL, GARMIN_PASSWORD)
@@ -199,6 +206,7 @@ def run_sync():
         date_str = d.isoformat()
         print(f'  Pulling {date_str}...')
         days_data.append(pull_day(display_name, date_str))
+        time.sleep(1.5)  # avoid Garmin rate limiting (429)
 
     payload = {
         'synced_at': datetime.now().isoformat(timespec='seconds'),
